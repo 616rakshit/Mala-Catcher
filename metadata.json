@@ -1,0 +1,8 @@
+{
+  "name": "Remix: Mala Catcher",
+  "description": "A spiritual and meditative game inspired by Jain Terapanth. Catch dropping mala beads to complete your 108 mantra chant, hear the \u0027Om Bhikshu\u0027 sound, dodge negative thoughts, and explore teachings.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
