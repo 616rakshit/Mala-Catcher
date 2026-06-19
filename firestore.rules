@@ -1,0 +1,94 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // 1. Global Safety Net - Default Deny Catch-All
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Standard Primitives & Helpers
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // Entity Validation Blueprints
+    function isValidUser(data) {
+      return data.uid is string 
+        && data.uid == request.auth.uid
+        && data.name is string 
+        && data.name.size() > 0 
+        && data.name.size() <= 100
+        && (!data.keys().contains('email') || (data.email is string && data.email.size() <= 200))
+        && (!data.keys().contains('streakDays') || data.streakDays is int)
+        && (!data.keys().contains('totalMalas') || data.totalMalas is int)
+        && (!data.keys().contains('dailyTarget') || (data.dailyTarget is int && data.dailyTarget >= 1 && data.dailyTarget <= 108));
+    }
+
+    function isValidDailyStats(data) {
+      return data.malasCompleted is int
+        && data.malasCompleted >= 0
+        && data.target is int
+        && data.target >= 1
+        && (!data.keys().contains('diaryChauvihar') || data.diaryChauvihar is bool)
+        && (!data.keys().contains('diarySwadhyay') || data.diarySwadhyay is bool)
+        && (!data.keys().contains('diaryAhimsa') || data.diaryAhimsa is bool)
+        && (!data.keys().contains('diaryKrodhControl') || data.diaryKrodhControl is bool);
+    }
+
+    // --- Users Collection Rules ---
+    match /users/{userId} {
+      allow get: if isOwner(userId);
+      
+      // Let's allow creating a profile if they are the owner and matches schema
+      allow create: if isOwner(userId)
+        && isValidId(userId)
+        && isValidUser(incoming())
+        && incoming().keys().hasAll(['uid', 'name'])
+        && incoming().createdAt == request.time;
+
+      // Allow updates to profile details (like streak, name, totalMalas)
+      allow update: if isOwner(userId)
+        && isValidUser(incoming())
+        && incoming().updatedAt == request.time
+        && incoming().createdAt == existing().createdAt;
+
+      allow delete: if false; // Profiles are permanent for historical stats
+    }
+
+    // --- Daily Stats Sub-collection Rules ---
+    match /users/{userId}/dailyStats/{dateStr} {
+      allow get: if isOwner(userId);
+      allow list: if isOwner(userId);
+
+      allow create: if isOwner(userId)
+        && isValidId(userId)
+        && isValidId(dateStr)
+        && isValidDailyStats(incoming())
+        && incoming().keys().hasAll(['malasCompleted', 'target'])
+        && incoming().updatedAt == request.time;
+
+      allow update: if isOwner(userId)
+        && isValidDailyStats(incoming())
+        && incoming().updatedAt == request.time;
+
+      allow delete: if isOwner(userId);
+    }
+  }
+}

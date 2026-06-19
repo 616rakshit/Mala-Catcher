@@ -1,0 +1,93 @@
+{
+  "entities": {
+    "User": {
+      "title": "User Profile",
+      "description": "User account information and spiritual progress totals.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "The dynamic user ID, matching the Firebase Auth uid."
+        },
+        "name": {
+          "type": "string",
+          "description": "The name of the spiritual seeker."
+        },
+        "email": {
+          "type": "string",
+          "description": "The user's email address."
+        },
+        "streakDays": {
+          "type": "integer",
+          "description": "The current continuous streak of active sadhana in days."
+        },
+        "totalMalas": {
+          "type": "integer",
+          "description": "All time total malas completed."
+        },
+        "dailyTarget": {
+          "type": "integer",
+          "description": "Spiritual target of malas for single days."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "The server-generated timestamp when user first joined."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "The server-generated timestamp of the last update."
+        }
+      },
+      "required": ["uid", "name"]
+    },
+    "DailyStats": {
+      "title": "Daily Sadhana Stats",
+      "description": "Track progress and spiritual samyama metrics for a given calendar date.",
+      "type": "object",
+      "properties": {
+        "malasCompleted": {
+          "type": "integer",
+          "description": "Count of complete 108 bead chants on this date."
+        },
+        "target": {
+          "type": "integer",
+          "description": "The daily mala target vow configuration on this date."
+        },
+        "diaryChauvihar": {
+          "type": "boolean",
+          "description": "Whether early dinner vow till sunset was kept."
+        },
+        "diarySwadhyay": {
+          "type": "boolean",
+          "description": "Whether holy self-study was performed."
+        },
+        "diaryAhimsa": {
+          "type": "boolean",
+          "description": "Whether non-violent/compassion speech check was perfect."
+        },
+        "diaryKrodhControl": {
+          "type": "boolean",
+          "description": "Whether equanimity under anger was sustained."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp when this daily stat entry was updated."
+        }
+      },
+      "required": ["malasCompleted", "target"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "Root user profile document."
+    },
+    "/users/{userId}/dailyStats/{dateStr}": {
+      "schema": "DailyStats",
+      "description": "Sub-collection document for tracking each day's spiritual records."
+    }
+  }
+}

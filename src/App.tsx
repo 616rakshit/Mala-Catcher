@@ -25,12 +25,19 @@ import {
 } from "lucide-react";
 import { GameState } from "./types";
 import { audio } from "./utils/audio";
+import { auth, db, googleProvider, OperationType, handleFirestoreError } from "./utils/firebase";
+import { signInWithPopup, signOut, onAuthStateChanged, User as FirebaseUser } from "firebase/auth";
+import { doc, setDoc, updateDoc, onSnapshot, serverTimestamp } from "firebase/firestore";
 import SadhanaGame from "./components/SadhanaGame";
 import AIGuide from "./components/AIGuide";
 import VirtuesOverview from "./components/VirtuesOverview";
 import StatsPanel from "./components/StatsPanel";
 
 export default function App() {
+  // Authentication & Sync global states
+  const [user, setUser] = useState<FirebaseUser | null>(null);
+  const isSyncingRef = useRef(false);
+
   // Global States
   const [currentScreen, setCurrentScreen] = useState<GameState>(GameState.HOME);
   const [activeJaaps, setActiveJaaps] = useState<number>(0);
@@ -84,6 +91,210 @@ export default function App() {
   const [isAnimatingChain, setIsAnimatingChain] = useState(false);
   const [chainBeadIndex, setChainBeadIndex] = useState<number | null>(null);
   const prevMalaCount = useRef(malasCompleted);
+
+  // Get current date string formatted
+  const getTodayKey = () => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  };
+
+  // 1. Listen for user login/logout
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+    });
+    return unsubscribe;
+  }, []);
+
+  // 2. Real-time snapshot subscription from Firestore to Local States
+  useEffect(() => {
+    if (!user) return;
+
+    isSyncingRef.current = true;
+
+    // Listen to parent user profile doc
+    const unsubUser = onSnapshot(doc(db, "users", user.uid), (snap) => {
+      if (snap.exists()) {
+        isSyncingRef.current = true;
+        const data = snap.data();
+        if (data.name !== undefined) {
+          setSeekerName(data.name);
+          localStorage.setItem("seeker_name", data.name);
+        }
+        if (data.dailyTarget !== undefined) {
+          setTarget(data.dailyTarget);
+          localStorage.setItem("mala_target", String(data.dailyTarget));
+        }
+        if (data.streakDays !== undefined) {
+          setStreakDays(data.streakDays);
+          localStorage.setItem("streak_days", String(data.streakDays));
+        }
+        if (data.totalMalas !== undefined) {
+          setMalasCompleted(data.totalMalas);
+          localStorage.setItem("malas_completed", String(data.totalMalas));
+        }
+        setTimeout(() => {
+          isSyncingRef.current = false;
+        }, 80);
+      } else {
+        // Doc doesn't exist, bootstrap one with our local state
+        setDoc(doc(db, "users", user.uid), {
+          uid: user.uid,
+          name: seekerName || user.displayName || "Noble Seeker",
+          email: user.email,
+          streakDays: streakDays,
+          totalMalas: malasCompleted,
+          dailyTarget: target,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp()
+        }).then(() => {
+          isSyncingRef.current = false;
+        }).catch((err) => {
+          handleFirestoreError(err, OperationType.CREATE, `users/${user.uid}`);
+        });
+      }
+    }, (err) => {
+      handleFirestoreError(err, OperationType.GET, `users/${user.uid}`);
+    });
+
+    // Listen to today's daily statistics checklist doc
+    const todayKey = getTodayKey();
+    const unsubStats = onSnapshot(doc(db, "users", user.uid, "dailyStats", todayKey), (snap) => {
+      if (snap.exists()) {
+        isSyncingRef.current = true;
+        const data = snap.data();
+        if (data.diaryChauvihar !== undefined) {
+          localStorage.setItem("diary_chauvihar", String(data.diaryChauvihar));
+        }
+        if (data.diarySwadhyay !== undefined) {
+          localStorage.setItem("diary_swadhyay", String(data.diarySwadhyay));
+        }
+        if (data.diaryAhimsa !== undefined) {
+          localStorage.setItem("diary_ahimsa", String(data.diaryAhimsa));
+        }
+        if (data.diaryKrodhControl !== undefined) {
+          localStorage.setItem("diary_krodh", String(data.diaryKrodhControl));
+        }
+        // Force re-read in components
+        window.dispatchEvent(new Event("storage"));
+        setTimeout(() => {
+          isSyncingRef.current = false;
+        }, 80);
+      }
+    }, (err) => {
+      handleFirestoreError(err, OperationType.GET, `users/${user.uid}/dailyStats/${todayKey}`);
+    });
+
+    return () => {
+      unsubUser();
+      unsubStats();
+    };
+  }, [user]);
+
+  // 3. Sync changes from local state to Firestore with slight debounce
+  useEffect(() => {
+    if (!user || isSyncingRef.current) return;
+
+    const syncProfileAndToday = async () => {
+      try {
+        await setDoc(doc(db, "users", user.uid), {
+          uid: user.uid,
+          name: seekerName,
+          email: user.email,
+          streakDays: streakDays,
+          totalMalas: malasCompleted,
+          dailyTarget: target,
+          updatedAt: serverTimestamp()
+        }, { merge: true });
+
+        const todayKey = getTodayKey();
+        await setDoc(doc(db, "users", user.uid, "dailyStats", todayKey), {
+          malasCompleted: malasCompleted,
+          target: target,
+          updatedAt: serverTimestamp()
+        }, { merge: true });
+
+      } catch (err) {
+        handleFirestoreError(err, OperationType.UPDATE, `users/${user.uid}`);
+      }
+    };
+
+    const timer = setTimeout(syncProfileAndToday, 1000);
+    return () => clearTimeout(timer);
+  }, [seekerName, target, streakDays, malasCompleted, user]);
+
+  // 4. Periodically monitor and sync samyama diary checklist checkboxes from localStorage to Firestore
+  useEffect(() => {
+    if (!user) return;
+
+    let prevChauvihar = localStorage.getItem("diary_chauvihar");
+    let prevSwadhyay = localStorage.getItem("diary_swadhyay");
+    let prevAhimsa = localStorage.getItem("diary_ahimsa");
+    let prevKrodh = localStorage.getItem("diary_krodh");
+
+    const interval = setInterval(async () => {
+      const curChauvihar = localStorage.getItem("diary_chauvihar");
+      const curSwadhyay = localStorage.getItem("diary_swadhyay");
+      const curAhimsa = localStorage.getItem("diary_ahimsa");
+      const curKrodh = localStorage.getItem("diary_krodh");
+
+      if (
+        curChauvihar !== prevChauvihar ||
+        curSwadhyay !== prevSwadhyay ||
+        curAhimsa !== prevAhimsa ||
+        curKrodh !== prevKrodh
+      ) {
+        prevChauvihar = curChauvihar;
+        prevSwadhyay = curSwadhyay;
+        prevAhimsa = curAhimsa;
+        prevKrodh = curKrodh;
+
+        if (isSyncingRef.current) return;
+
+        const todayKey = getTodayKey();
+        try {
+          await setDoc(
+            doc(db, "users", user.uid, "dailyStats", todayKey),
+            {
+              diaryChauvihar: curChauvihar === "true",
+              diarySwadhyay: curSwadhyay === "true",
+              diaryAhimsa: curAhimsa === "true",
+              diaryKrodhControl: curKrodh === "true",
+              malasCompleted: malasCompleted,
+              target: target,
+              updatedAt: serverTimestamp()
+            },
+            { merge: true }
+          );
+        } catch (err) {
+          handleFirestoreError(err, OperationType.UPDATE, `users/${user.uid}/dailyStats/${todayKey}`);
+        }
+      }
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [user, malasCompleted, target]);
+
+  const handleSignIn = async () => {
+    try {
+      const result = await signInWithPopup(auth, googleProvider);
+      if (result.user) {
+        setUser(result.user);
+        setIsNameModalOpen(false);
+      }
+    } catch (error) {
+      console.error("Auth sign in failed:", error);
+    }
+  };
+
+  const handleSignOut = async () => {
+    try {
+      await signOut(auth);
+      setUser(null);
+    } catch (error) {
+      console.error("Auth sign out failed:", error);
+    }
+  };
 
   // Listen for Mala completions to run a sophisticated chain reaction sequential glow around the beads
   useEffect(() => {
@@ -522,15 +733,61 @@ export default function App() {
             {isGlobalMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
           </button>
 
-          {/* Profile Name setup shortcut */}
-          <button
-            onClick={() => setIsNameModalOpen(true)}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-stone-200 text-xs font-mono text-stone-500 hover:bg-stone-50 transition-all pointer-events-auto cursor-pointer"
-            id="btn-edit-profile"
-          >
-            <User className="w-3.5 h-3.5 text-amber-500" />
-            <span>{seekerName || "Sadhaka"}</span>
-          </button>
+          {/* Firebase Authentication Progress Syncer */}
+          {user ? (
+            <div className="flex items-center gap-1.5 border border-amber-100 bg-amber-50/40 p-1 rounded-2xl">
+              {user.photoURL ? (
+                <img
+                  src={user.photoURL}
+                  alt={seekerName || user.displayName || "Sadhaka"}
+                  className="w-7 h-7 rounded-full border border-amber-200"
+                  referrerPolicy="no-referrer"
+                />
+              ) : (
+                <div className="w-7 h-7 rounded-full bg-amber-100 border border-amber-200 text-amber-800 flex items-center justify-center font-bold text-xs">
+                  {(seekerName || user.displayName || "S").charAt(0).toUpperCase()}
+                </div>
+              )}
+              
+              <button
+                onClick={() => setIsNameModalOpen(true)}
+                className="px-2 py-1 flex flex-col items-start leading-none text-left hover:bg-white/60 rounded-lg transition-all"
+                title="Change display name"
+              >
+                <span className="text-[8px] font-mono font-bold text-amber-600 block uppercase tracking-wider">SYNCED</span>
+                <span className="text-[11px] font-sans font-bold text-stone-800 block truncate max-w-[80px]">
+                  {seekerName || user.displayName || "Sadhaka"}
+                </span>
+              </button>
+
+              <button
+                onClick={handleSignOut}
+                className="p-1 text-stone-400 hover:text-red-500 rounded-lg hover:bg-white/60 transition-all cursor-pointer mr-1"
+                title="Log Out/Disconnect"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          ) : (
+            <div className="flex items-center gap-2">
+              <button
+                onClick={handleSignIn}
+                className="flex items-center gap-1 bg-amber-600 hover:bg-amber-700 text-white font-semibold text-[11px] tracking-tight px-2.5 py-1.5 rounded-xl shadow-sm hover:shadow transition-all cursor-pointer"
+                id="btn-google-sign-in"
+              >
+                <User className="w-3 h-3" />
+                <span>Sync Progress</span>
+              </button>
+
+              <button
+                onClick={() => setIsNameModalOpen(true)}
+                className="flex items-center gap-1 px-2 py-1.5 border border-stone-200 text-[11px] text-stone-500 rounded-xl hover:bg-stone-50 transition-all cursor-pointer font-mono"
+                title="Edit local name"
+              >
+                <span>{seekerName || "Sadhaka"}</span>
+              </button>
+            </div>
+          )}
         </div>
       </header>
 
